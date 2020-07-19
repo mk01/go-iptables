@@ -64,6 +64,8 @@ const (
 )
 
 type IPTables struct {
+	// pid namespace
+	nspid          string
 	path           string
 	proto          Protocol
 	hasCheck       bool
@@ -92,12 +94,16 @@ type Stat struct {
 // New creates a new IPTables.
 // For backwards compatibility, this always uses IPv4, i.e. "iptables".
 func New() (*IPTables, error) {
-	return NewWithProtocol(ProtocolIPv4)
+	return NewWithProtocolNS(ProtocolIPv4, 0)
 }
 
 // New creates a new IPTables for the given proto.
 // The proto will determine which command is used, either "iptables" or "ip6tables".
 func NewWithProtocol(proto Protocol) (*IPTables, error) {
+	return NewWithProtocolNS(proto, 0)
+}
+
+func NewWithProtocolNS(proto Protocol, pid int) (*IPTables, error) {
 	path, err := exec.LookPath(getIptablesCommand(proto))
 	if err != nil {
 		return nil, err
@@ -114,6 +120,7 @@ func NewWithProtocol(proto Protocol) (*IPTables, error) {
 	checkPresent, waitPresent, randomFullyPresent := getIptablesCommandSupport(v1, v2, v3)
 
 	ipt := IPTables{
+		nspid:          fmt.Sprint(pid),
 		path:           path,
 		proto:          proto,
 		hasCheck:       checkPresent,
@@ -425,7 +432,7 @@ func (ipt *IPTables) run(args ...string) error {
 func (ipt *IPTables) runWithOutput(args []string, stdout io.Writer) error {
 	args = append([]string{ipt.path}, args...)
 	if ipt.hasWait {
-		args = append(args, "--wait")
+		args = append(args, "--wait", "-W", "1000")
 	} else {
 		fmu, err := newXtablesFileLock()
 		if err != nil {
@@ -447,7 +454,7 @@ func (ipt *IPTables) runWithOutput(args []string, stdout io.Writer) error {
 		Stderr: &stderr,
 	}
 
-	if err := cmd.Run(); err != nil {
+	if err := ipt.WrapNSenter(&cmd).Run(); err != nil {
 		switch e := err.(type) {
 		case *exec.ExitError:
 			return &Error{*e, cmd, stderr.String(), nil}
@@ -592,4 +599,18 @@ func filterRuleOutput(rule string) string {
 	}
 
 	return out
+}
+
+func (ipt *IPTables) GetNSPid() string {
+	return ipt.nspid
+}
+
+func (ipt *IPTables) WrapNSenter(cmd *exec.Cmd) *exec.Cmd {
+	if ipt.nspid != "0" {
+		c := exec.Command("nsenter", append([]string{"-t", ipt.nspid, "-n"}, cmd.Args...)...)
+		cmd.Path = c.Path
+		cmd.Args = c.Args
+	}
+
+	return cmd
 }
